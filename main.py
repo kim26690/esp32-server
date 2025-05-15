@@ -1,5 +1,5 @@
 import os, time, base64, threading, requests
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from google.cloud import storage
 from dotenv import load_dotenv
 import cv2
@@ -11,7 +11,6 @@ app = Flask(__name__)
 # ===== 설정 =====
 GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME", "my-smart-recordings")
 GCS_CREDENTIALS_FILE = "service-account-key.json"
-
 VISION_API_KEY = os.getenv("VISION_API_KEY")
 TRANSLATE_API_KEY = os.getenv("TRANSLATE_API_KEY")
 VISION_URL = f"https://vision.googleapis.com/v1/images:annotate?key={VISION_API_KEY}"
@@ -24,6 +23,7 @@ recording = False
 video_writer = None
 recording_filename = ""
 last_detect_time = 0
+latest_frame = None  # MJPEG 스트리밍용 프레임
 
 # ===== GCS 업로드 함수 =====
 def upload_to_gcs(local_path, gcs_path):
@@ -81,10 +81,12 @@ def update_distance():
 
 @app.route('/upload', methods=['POST'])
 def upload_image():
-    global recording, video_writer, recording_filename, last_detect_time
+    global recording, video_writer, recording_filename, last_detect_time, latest_frame
     img_bytes = request.data
     if not img_bytes:
         return "❌ 이미지 없음", 400
+
+    latest_frame = img_bytes  # MJPEG 스트리밍용
 
     np_arr = np.frombuffer(img_bytes, np.uint8)
     frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
@@ -98,6 +100,16 @@ def upload_image():
         last_detect_time = time.time()
 
     return "✅ 이미지 수신 완료", 200
+
+@app.route('/video')
+def video():
+    def generate():
+        while True:
+            if latest_frame:
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + latest_frame + b'\r\n')
+            time.sleep(0.1)
+    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 @app.route('/label')
 def get_label():
